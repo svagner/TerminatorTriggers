@@ -1,9 +1,19 @@
 # TerminatorTriggers
 Terminator plugin for automatically make predefined action if last terminal line contain pattern
 
+## DESCRIPTION
+
+Try to add some extras behaviour from iTerm to Terminator:)
+
 ## INSTALLATION
 
 Put this .py in /usr/share/terminator/terminatorlib/plugins/triggers.py or ~/.config/terminator/plugins/triggers.py.
+
+For keepass action support please install `pykeepass` module:
+
+```
+pip install pykeepass
+```
 
 ## CONFIGURATION
 
@@ -21,6 +31,7 @@ Configuration keys :
 Actions:
 - input [some text] - insert line defined in input derective
 - exec [command with arguments] - exec command and input last line of stdout to terminal. Be aware: new line of stdout will be removed
+- keepass - open keepass dialog for select password (with search)
 
 
 Configuration example:
@@ -28,10 +39,15 @@ Configuration example:
 ```
 [plugins]
 [[Triggers]]
+keepassDb = /path/to/your/keepass.kdbx
+[[[input_some_text]]]
+new_line = True
+expect = "^say\s+hello:\s+$"
+action = input hello
 [[[input_password]]]
 new_line = True
 expect = "^Password:\s+$"
-action = input mysuperpassword
+action = keepass
 [[[input_token]]]
 new_line = True
 expect = "Token:\s+$"
