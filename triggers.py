@@ -67,24 +67,48 @@ import re
 import os
 import cmd
 import subprocess
+from gi.repository import Gtk
 
 import terminatorlib.plugin as plugin
 
 from terminatorlib.util import err, dbg
 from terminatorlib.terminator import Terminator
 from terminatorlib.config import Config
+from terminatorlib.terminal_popup_menu import TerminalPopupMenu
 
 PLUGIN_NAME = 'Triggers'
 AVAILABLE = [PLUGIN_NAME]
 available = [PLUGIN_NAME]
+keepassSupport = True
+
+try:
+  from pykeepass import PyKeePass
+except ImportError:
+  keepassSupport = False
 
 try:
     import pynotify
 except ImportError:
     err('Triggers plugin unavailable: pynotify unavailable')
 
+class TriggersCommandResult(object):
+  def __init__(self):
+    self._result = None
+
+  def set_result(self, result):
+    self._result = result
+
+  def get_result(self):
+    return self._result
+
 # Difines action commands
 class TriggersCommand(cmd.Cmd):
+  def __init__(self, keepassDb=''):
+    cmd.Cmd.__init__(self)
+    self.keepassMaterPassword = ''
+    self.keepassDb = keepassDb
+    self.lastPasswordSelect = ''
+
   def do_exec(self, line):
     process = subprocess.Popen(line.split(), stdout=subprocess.PIPE)
     output, _ = process.communicate()
@@ -92,6 +116,134 @@ class TriggersCommand(cmd.Cmd):
     if len(res) > 0:
       return res[-1]
     return ''
+
+  def ask_password(self):
+    passwordInput = Gtk.Entry()
+    passwordInput.set_visibility(False)
+
+    def get_response(dialog,response_id):
+      if response_id == 1:
+        self.keepassMaterPassword = passwordInput.get_text()
+
+    def activate(entry):
+      self.keepassMaterPassword = passwordInput.get_text()
+      
+    dbox = Gtk.Dialog(("Input keepass master password"), None, Gtk.DialogFlags.MODAL)
+
+    dbox.add_action_widget(passwordInput,0);
+
+    dbox.add_button("OK", 1);
+    dbox.add_button("CANCEL",2);
+    dbox.set_default_response(1);
+    dbox.set_focus(passwordInput) 
+
+    dbox.connect("response", get_response)
+    passwordInput.connect("activate", activate)
+    dbox.show_all()
+    dbox.run()
+    dbox.destroy()
+
+  def _get_passwords_from_keepass(self):
+    kp = PyKeePass(self.keepassDb, password=self.keepassMaterPassword)
+    return kp.entries
+
+  def do_keepass(self, args):
+    if not keepassSupport:
+      err('triggers plugin: Keepass is not supported. Please install module pykeepass')
+      return
+    if not self.keepassDb:
+      err('triggers plugin: Keepass support was disabled because no option keepassDb in plugin configuration')
+      return
+
+    # we will remember password for keepass in memory for prevent ask password each time
+    if not self.keepassMaterPassword:
+      self.ask_password()
+
+    # see https://github.com/EliverLara/terminator-themes/blob/master/plugin/terminator-themes.py
+    dbox = Gtk.Dialog(("Select password"), None, Gtk.DialogFlags.MODAL)
+    main_container = Gtk.HBox(spacing=7)
+    dbox.vbox.pack_start(main_container, True, True, 0)
+
+    passwords = self._get_passwords_from_keepass()
+    liststore = Gtk.ListStore(int, str, str, str)
+
+    # create the TreeView using liststore
+    treeview = Gtk.TreeView()
+    treeview.set_model(model=liststore)  
+    
+    def password_search(search_entry):
+      search_text = search_entry.get_text()
+      liststore.clear()
+      for idx, passwd in enumerate(passwords):
+        if search_text.lower() in passwd.username.lower():
+          liststore.append((idx, passwd.username, passwd.title, passwd.group.name))
+      treeview.set_cursor(0)
+
+    searchInput = Gtk.SearchEntry()
+    searchInput.set_text(self.lastPasswordSelect)
+    searchInput.set_can_focus(True)
+    searchInput.set_visible(True)
+    searchInput.set_hexpand(False)
+    searchInput.set_vexpand(False)
+    searchInput.connect('search_changed', password_search)
+
+    dbox.vbox.pack_start(searchInput, True, True, 0)
+
+    # create the TreeViewColumns to display the data
+    columns = [
+      Gtk.TreeViewColumn('#id', Gtk.CellRendererText(),
+                                    text=0),
+      Gtk.TreeViewColumn('Login', Gtk.CellRendererText(),
+                                    text=1),
+      Gtk.TreeViewColumn('Description', Gtk.CellRendererText(),
+                                    text=2),
+      Gtk.TreeViewColumn('Group', Gtk.CellRendererText(),
+                                    text=3),
+    ]
+
+    for idx, passwd in enumerate(passwords):
+      liststore.append((idx, passwd.username, passwd.title, passwd.group.name))
+
+    treeview.set_cursor(0)
+
+    # add columns to treeview
+    for col in columns:
+      treeview.append_column(col)
+
+    #dbox.vbox.pack_start(main_container, True, True, 0)
+    dbox.vbox.pack_start(treeview, True, True, 0)
+
+    dbox.add_button("OK", 1)
+    dbox.add_button("CANCEL",2)
+    dbox.set_default_response(1)
+
+    result = TriggersCommandResult()
+
+    def get_response(dialog,response_id, res):
+      if response_id == 1:
+        sel = treeview.get_selection()
+        tm, ti = sel.get_selected()
+        id = tm.get_value(ti, 0)
+        res.set_result(passwords[id].password)
+
+    def activate(entry, res):
+      sel = treeview.get_selection()
+      tm, ti = sel.get_selected()
+      id = tm.get_value(ti, 0)
+      res.set_result(passwords[id].password)
+      dbox.destroy()
+
+    dbox.connect("response", get_response, result)
+    searchInput.connect("activate", activate, result)
+
+    self.dbox = dbox
+    dbox.show_all()
+    dbox.run()
+
+    del(self.dbox)
+    dbox.destroy()
+
+    return result.get_result()
 
   def do_input(self, line):
       return line
@@ -107,6 +259,11 @@ class Triggers(plugin.Plugin):
     self.watches = {}
     self.load_triggers()
     self.update_watches()
+    self.dialog_in_process = set()
+    keepassDb = ''
+    if 'keepassDb' in self.config:
+      keepassDb = self.config['keepassDb']
+    self.triggersCommand = TriggersCommand(keepassDb)
                     
   def update_watches(self):
     for terminal in Terminator().terminals:
@@ -114,6 +271,9 @@ class Triggers(plugin.Plugin):
         self.watches[terminal] = terminal.get_vte().connect('contents-changed', self.check_input, terminal)
 
   def check_input(self, _vte, terminal):
+    if terminal in self.dialog_in_process:
+      return True
+    self.dialog_in_process.add(terminal)
     self.update_watches()
     last_line = self.get_last_line(terminal)
 
@@ -122,9 +282,15 @@ class Triggers(plugin.Plugin):
 
         for expect,cmd in self.triggers.items():
           if re.match(expect, last_line):
-            res = TriggersCommand().onecmd(cmd['action'])
+            try:
+              res = self.triggersCommand.onecmd(cmd['action'])
+            except Exception as e:
+              err("Error while execute command {}: {}".format(cmd['action'], str(e)))
+              break
             dbg('Match {}. Result: {}'.format(expect, res))
             self.insert_to_terminal(terminal, res, cmd['new_line'])
+            break
+    self.dialog_in_process.remove(terminal)
     return True
 
   def insert_to_terminal(self, terminal, text, new_line = False):
@@ -161,6 +327,8 @@ class Triggers(plugin.Plugin):
 
   def load_triggers(self):
     for k,v in self.config.items():
+      if not isinstance(v, dict):
+        continue
       dbg("Load trigger [{}]".format(k))
       if 'action' not in v or 'expect' not in v:
         continue
